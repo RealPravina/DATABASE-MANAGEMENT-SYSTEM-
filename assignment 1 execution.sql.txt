@@ -1,0 +1,343 @@
+-- CSA05 Assignment 1 CO1 – MySQL 8.0+
+-- Run in MySQL Workbench or mysql client. This script creates a fresh database.
+-- Seed used for repeatable test population: 4211.
+DROP DATABASE IF EXISTS meridian_museum;
+CREATE DATABASE meridian_museum;
+USE meridian_museum;
+
+CREATE TABLE person (
+  person_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  given_name VARCHAR(60) NOT NULL,
+  middle_name VARCHAR(60),
+  family_name VARCHAR(60) NOT NULL,
+  email VARCHAR(120) UNIQUE
+) ENGINE=InnoDB;
+
+CREATE TABLE person_phone (
+  person_id BIGINT UNSIGNED NOT NULL,
+  phone_no VARCHAR(25) NOT NULL,
+  PRIMARY KEY(person_id, phone_no),
+  CONSTRAINT fk_phone_person FOREIGN KEY(person_id) REFERENCES person(person_id)
+    ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB;
+
+CREATE TABLE employee (
+  person_id BIGINT UNSIGNED PRIMARY KEY,
+  role ENUM('CURATOR','REGISTRAR','OTHER') NOT NULL,
+  hire_date DATE,
+  FOREIGN KEY(person_id) REFERENCES person(person_id)
+) ENGINE=InnoDB;
+
+CREATE TABLE curator (
+  person_id BIGINT UNSIGNED PRIMARY KEY,
+  specialty VARCHAR(100),
+  FOREIGN KEY(person_id) REFERENCES employee(person_id)
+) ENGINE=InnoDB;
+
+CREATE TABLE registrar (
+  person_id BIGINT UNSIGNED PRIMARY KEY,
+  authorization_level VARCHAR(40),
+  FOREIGN KEY(person_id) REFERENCES employee(person_id)
+) ENGINE=InnoDB;
+
+CREATE TABLE organization (
+  organization_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  organization_name VARCHAR(150) NOT NULL UNIQUE
+) ENGINE=InnoDB;
+
+CREATE TABLE collection_unit (
+  unit_id INT AUTO_INCREMENT PRIMARY KEY,
+  unit_name VARCHAR(100) NOT NULL UNIQUE
+) ENGINE=InnoDB;
+
+CREATE TABLE collection_type (
+  collection_type_id INT AUTO_INCREMENT PRIMARY KEY,
+  type_name VARCHAR(80) NOT NULL UNIQUE,
+  description VARCHAR(255)
+) ENGINE=InnoDB;
+
+CREATE TABLE artifact (
+  artifact_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  accession_code VARCHAR(40) NOT NULL UNIQUE,
+  title VARCHAR(200) NOT NULL,
+  collection_type_id INT,
+  unit_id INT,
+  appraised_value DECIMAL(14,2),
+  FOREIGN KEY(collection_type_id) REFERENCES collection_type(collection_type_id),
+  FOREIGN KEY(unit_id) REFERENCES collection_unit(unit_id)
+) ENGINE=InnoDB;
+
+CREATE TABLE loan (
+  loan_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  lender_person_id BIGINT UNSIGNED NOT NULL,
+  start_date DATE NOT NULL,
+  due_date DATE NOT NULL,
+  actual_return_date DATE NULL,
+  status ENUM('OPEN','RETURNED','CANCELLED') NOT NULL DEFAULT 'OPEN',
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT chk_loan_dates CHECK (due_date >= start_date),
+  CONSTRAINT chk_return_date CHECK (actual_return_date IS NULL OR actual_return_date >= start_date),
+  FOREIGN KEY(lender_person_id) REFERENCES person(person_id)
+) ENGINE=InnoDB;
+
+CREATE TABLE loan_object (
+  loan_object_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  loan_id BIGINT UNSIGNED NOT NULL,
+  artifact_id BIGINT UNSIGNED NOT NULL,
+  received_condition VARCHAR(500) NOT NULL,
+  return_condition VARCHAR(500),
+  line_value DECIMAL(14,2),
+  UNIQUE(loan_id, artifact_id),
+  FOREIGN KEY(loan_id) REFERENCES loan(loan_id) ON DELETE RESTRICT,
+  FOREIGN KEY(artifact_id) REFERENCES artifact(artifact_id) ON DELETE RESTRICT
+) ENGINE=InnoDB;
+
+CREATE TABLE condition_report (
+  report_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  artifact_id BIGINT UNSIGNED NOT NULL,
+  loan_object_id BIGINT UNSIGNED NULL,
+  assessor_person_id BIGINT UNSIGNED NOT NULL,
+  report_date DATE NOT NULL,
+  findings TEXT NOT NULL,
+  FOREIGN KEY(artifact_id) REFERENCES artifact(artifact_id),
+  FOREIGN KEY(loan_object_id) REFERENCES loan_object(loan_object_id),
+  FOREIGN KEY(assessor_person_id) REFERENCES person(person_id)
+) ENGINE=InnoDB;
+
+CREATE TABLE exhibition (
+  exhibition_id INT AUTO_INCREMENT PRIMARY KEY,
+  exhibition_name VARCHAR(150) NOT NULL,
+  start_date DATE,
+  end_date DATE
+) ENGINE=InnoDB;
+
+-- Weak entity: slot identity is scoped by its exhibition owner.
+CREATE TABLE display_slot (
+  exhibition_id INT NOT NULL,
+  slot_no INT NOT NULL,
+  location_label VARCHAR(100),
+  PRIMARY KEY(exhibition_id, slot_no),
+  FOREIGN KEY(exhibition_id) REFERENCES exhibition(exhibition_id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+CREATE TABLE placement (
+  placement_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  loan_object_id BIGINT UNSIGNED NOT NULL,
+  exhibition_id INT NOT NULL,
+  slot_no INT NOT NULL,
+  from_date DATE NOT NULL,
+  to_date DATE,
+  CHECK (to_date IS NULL OR to_date >= from_date),
+  FOREIGN KEY(loan_object_id) REFERENCES loan_object(loan_object_id),
+  FOREIGN KEY(exhibition_id, slot_no) REFERENCES display_slot(exhibition_id, slot_no)
+) ENGINE=InnoDB;
+
+-- New requirement: temporal shared legal ownership. Exactly one owner target per row.
+CREATE TABLE artifact_owner (
+  artifact_owner_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  artifact_id BIGINT UNSIGNED NOT NULL,
+  person_owner_id BIGINT UNSIGNED NULL,
+  organization_owner_id BIGINT UNSIGNED NULL,
+  share_percent DECIMAL(5,2) NOT NULL,
+  valid_from DATE NOT NULL,
+  valid_to DATE NULL,
+  CHECK (share_percent > 0 AND share_percent <= 100),
+  CHECK (valid_to IS NULL OR valid_to >= valid_from),
+  CHECK ((person_owner_id IS NOT NULL AND organization_owner_id IS NULL)
+      OR (person_owner_id IS NULL AND organization_owner_id IS NOT NULL)),
+  FOREIGN KEY(artifact_id) REFERENCES artifact(artifact_id),
+  FOREIGN KEY(person_owner_id) REFERENCES person(person_id),
+  FOREIGN KEY(organization_owner_id) REFERENCES organization(organization_id),
+  INDEX ix_owner_artifact_dates(artifact_id, valid_from, valid_to)
+) ENGINE=InnoDB;
+
+CREATE INDEX ix_loan_due_status ON loan(status, due_date);
+CREATE INDEX ix_loan_lender ON loan(lender_person_id);
+CREATE INDEX ix_lo_object_artifact ON loan_object(artifact_id);
+CREATE INDEX ix_report_artifact_date ON condition_report(artifact_id, report_date);
+CREATE INDEX ix_placement_exhibition ON placement(exhibition_id, slot_no);
+
+INSERT INTO collection_unit(unit_name)
+VALUES ('Unit A'),('Unit B'),('Unit C'),('Unit D'),
+       ('Unit E'),('Unit F'),('Unit G'),('Unit H');
+INSERT INTO collection_type(type_name,description)
+VALUES ('Sculpture','Three-dimensional artwork'),
+       ('Painting','Canvas or panel artwork'),
+       ('Textile','Fabric and woven object'),
+       ('Document','Paper-based historical item');
+
+-- Small reproducible demonstration population.
+INSERT INTO person(given_name,family_name,email) VALUES
+('Asha','Raman','asha@example.org'),
+('Bala','Kumar','bala@example.org'),
+('Charu','Devi','charu@example.org'),
+('Dinesh','Rao','dinesh@example.org'),
+('Esha','Nair','esha@example.org');
+INSERT INTO person_phone VALUES (1,'9000000001'),(1,'9000000002'),(2,'9000000003');
+INSERT INTO employee(person_id,role,hire_date) VALUES (3,'CURATOR','2022-06-01'),(4,'REGISTRAR','2021-01-10');
+INSERT INTO curator(person_id,specialty) VALUES (3,'Sculpture');
+INSERT INTO registrar(person_id,authorization_level) VALUES (4,'Senior');
+INSERT INTO organization(organization_name) VALUES ('Heritage Trust');
+INSERT INTO artifact(accession_code,title,collection_type_id,unit_id,appraised_value)
+VALUES ('MM-0001','Bronze Horse',1,1,25000),
+       ('MM-0002','Ancient Portrait',2,2,40000),
+       ('MM-0003','Silk Banner',3,3,12000),
+       ('MM-0004','Archive Letter',4,4,5000);
+INSERT INTO loan(lender_person_id,start_date,due_date,status)
+VALUES (1,'2026-01-01','2026-12-31','OPEN'),
+       (2,'2025-01-01','2025-06-30','OPEN'),
+       (1,'2024-01-01','2024-04-30','RETURNED');
+INSERT INTO loan_object(loan_id,artifact_id,received_condition,return_condition,line_value)
+VALUES (1,1,'Stable; minor surface wear',NULL,24000),
+       (1,2,'Good; frame intact',NULL,39000),
+       (2,3,'Good; folded textile',NULL,11000),
+       (3,1,'Stable at receipt','Stable at return',23000);
+INSERT INTO condition_report(artifact_id,loan_object_id,assessor_person_id,report_date,findings)
+VALUES (1,1,3,'2026-01-01','Initial custody inspection: minor surface wear'),
+       (2,2,3,'2026-01-01','Frame and painted surface inspected'),
+       (1,4,3,'2024-04-30','Return inspection completed');
+INSERT INTO exhibition(exhibition_name,start_date,end_date)
+VALUES ('Treasures of Meridian','2026-02-01','2026-12-01');
+INSERT INTO display_slot VALUES (1,1,'Main gallery case'),(1,2,'North wall');
+INSERT INTO placement(loan_object_id,exhibition_id,slot_no,from_date,to_date)
+VALUES (1,1,1,'2026-02-01',NULL),(2,1,2,'2026-02-01',NULL);
+-- Ownership shares total 100% for each artifact in the current period.
+INSERT INTO artifact_owner(artifact_id,person_owner_id,share_percent,valid_from)
+VALUES (1,1,60,'2025-01-01'),(1,2,40,'2025-01-01'),
+       (2,1,100,'2025-01-01');
+INSERT INTO artifact_owner(artifact_id,organization_owner_id,share_percent,valid_from)
+VALUES (3,1,100,'2025-01-01');
+
+-- Demonstrate a failed CHECK / FK / UNIQUE write separately; uncomment one at a time.
+-- INSERT INTO loan(lender_person_id,start_date,due_date) VALUES (1,'2026-12-31','2026-01-01');
+-- Expected: CHECK constraint chk_loan_dates is violated.
+-- INSERT INTO loan_object(loan_id,artifact_id,received_condition) VALUES (9999,1,'Invalid loan');
+-- Expected: foreign key constraint fails.
+-- INSERT INTO artifact(accession_code,title) VALUES ('MM-0001','Duplicate accession');
+-- Expected: duplicate entry for UNIQUE accession_code.
+
+-- Deterministic sequence for scalable lender population (seed 4211).
+CREATE TABLE digit(n TINYINT PRIMARY KEY);
+INSERT INTO digit VALUES (0),(1),(2),(3),(4),(5),(6),(7),(8),(9);
+CREATE TABLE seq(n INT PRIMARY KEY);
+INSERT INTO seq
+SELECT d0.n + 10*d1.n + 100*d2.n + 1000*d3.n + 10000*d4.n + 1
+FROM digit d0 CROSS JOIN digit d1 CROSS JOIN digit d2
+CROSS JOIN digit d3 CROSS JOIN digit d4
+WHERE d0.n + 10*d1.n + 100*d2.n + 1000*d3.n + 10000*d4.n < 100000
+ORDER BY 1;
+
+-- To test one size, run the relevant INSERT below. Existing sample persons remain.
+-- The deterministic sequence is seeded/offset by 4211 in the generated names.
+-- 100 lenders:
+INSERT INTO person(given_name,family_name,email)
+SELECT CONCAT('Lender',LPAD(MOD(n+4211,100000),6,'0')),
+       CONCAT('Family',MOD(n,997)),
+       CONCAT('lender',n,'@example.test')
+FROM seq WHERE n <= 100;
+-- For 1,000 / 10,000 / 100,000 tests, use a fresh database or delete generated rows
+-- and rerun the INSERT with n <= 1000 / 10000 / 100000 respectively.
+-- To create proportional loan and evidence rows for all generated people:
+INSERT INTO loan(lender_person_id,start_date,due_date,status)
+SELECT p.person_id,'2026-01-01','2026-12-31','OPEN'
+FROM person p
+WHERE p.email LIKE 'lender%@example.test'
+ORDER BY p.person_id;
+-- Add a small fixed set of operational evidence per generated lender against existing artifacts.
+INSERT INTO loan_object(loan_id,artifact_id,received_condition,line_value)
+SELECT l.loan_id, 1, 'Generated receipt condition', 1000.00
+FROM loan l
+JOIN person p ON p.person_id=l.lender_person_id
+WHERE p.email LIKE 'lender%@example.test';
+-- One report per generated custody line.
+INSERT INTO condition_report(artifact_id,loan_object_id,assessor_person_id,report_date,findings)
+SELECT lo.artifact_id,lo.loan_object_id,3,'2026-01-02','Generated condition evidence'
+FROM loan_object lo
+JOIN loan l ON l.loan_id=lo.loan_id
+JOIN person p ON p.person_id=l.lender_person_id
+WHERE p.email LIKE 'lender%@example.test';
+
+-- Eight validation / workload queries.
+-- Q1: overdue loans that are still open.
+SELECT l.loan_id,p.given_name,p.family_name,l.due_date
+FROM loan l JOIN person p ON p.person_id=l.lender_person_id
+WHERE l.status='OPEN' AND l.due_date < CURRENT_DATE();
+
+-- Q2: artifacts without any recorded condition report (including empty result sets).
+SELECT a.artifact_id,a.accession_code,a.title
+FROM artifact a
+LEFT JOIN condition_report cr ON cr.artifact_id=a.artifact_id
+WHERE cr.report_id IS NULL;
+
+-- Q3: current custody details.
+SELECT l.loan_id,a.accession_code,a.title,l.start_date,l.due_date,l.status
+FROM loan l
+JOIN loan_object lo ON lo.loan_id=l.loan_id
+JOIN artifact a ON a.artifact_id=lo.artifact_id
+WHERE l.status='OPEN' AND l.actual_return_date IS NULL;
+
+-- Q4: condition history for each artifact.
+SELECT a.accession_code,cr.report_date,cr.findings,lo.loan_id
+FROM artifact a
+JOIN condition_report cr ON cr.artifact_id=a.artifact_id
+LEFT JOIN loan_object lo ON lo.loan_object_id=cr.loan_object_id
+ORDER BY a.artifact_id,cr.report_date;
+
+-- Q5: exhibition inventory and slot.
+SELECT e.exhibition_name,ds.slot_no,ds.location_label,a.accession_code,a.title,
+       pl.from_date,pl.to_date
+FROM placement pl
+JOIN display_slot ds ON ds.exhibition_id=pl.exhibition_id AND ds.slot_no=pl.slot_no
+JOIN exhibition e ON e.exhibition_id=ds.exhibition_id
+JOIN loan_object lo ON lo.loan_object_id=pl.loan_object_id
+JOIN artifact a ON a.artifact_id=lo.artifact_id;
+
+-- Q6: loans by lender.
+SELECT p.person_id,p.given_name,p.family_name,COUNT(l.loan_id) AS loan_count
+FROM person p LEFT JOIN loan l ON l.lender_person_id=p.person_id
+GROUP BY p.person_id,p.given_name,p.family_name
+ORDER BY loan_count DESC;
+
+-- Q7: artifacts with more than one historical loan occurrence.
+SELECT a.artifact_id,a.accession_code,COUNT(DISTINCT lo.loan_id) AS loan_occurrences
+FROM artifact a JOIN loan_object lo ON lo.artifact_id=a.artifact_id
+GROUP BY a.artifact_id,a.accession_code
+HAVING COUNT(DISTINCT lo.loan_id)>1;
+
+-- Q8: loan lines with no return-condition evidence.
+SELECT lo.loan_object_id,lo.loan_id,lo.artifact_id
+FROM loan_object lo
+WHERE lo.return_condition IS NULL;
+
+-- Ownership validation: current active shares should total 100 per artifact.
+SELECT artifact_id,SUM(share_percent) AS active_share_total
+FROM artifact_owner
+WHERE valid_from <= CURRENT_DATE()
+  AND (valid_to IS NULL OR valid_to >= CURRENT_DATE())
+GROUP BY artifact_id
+HAVING ABS(SUM(share_percent)-100.00) > 0.01;
+
+-- Migration audit: all loan lines and their evidence remain linked.
+SELECT lo.loan_object_id,lo.loan_id,lo.artifact_id,COUNT(cr.report_id) AS reports
+FROM loan_object lo LEFT JOIN condition_report cr
+  ON cr.loan_object_id=lo.loan_object_id
+GROUP BY lo.loan_object_id,lo.loan_id,lo.artifact_id;
+
+-- Flat-file anomaly demonstration (intentionally denormalized).
+CREATE TABLE flat_loan_file(
+  loan_id BIGINT, lender_name VARCHAR(120), lender_phone VARCHAR(25),
+  artifact_code VARCHAR(40), artifact_title VARCHAR(200),
+  loan_start DATE, loan_due DATE, condition_note VARCHAR(255)
+);
+INSERT INTO flat_loan_file VALUES
+(9001,'Asha Raman','9000000001','MM-0001','Bronze Horse','2026-01-01','2026-12-31','Minor wear'),
+(9002,'Asha Raman','9000000001','MM-0002','Ancient Portrait','2026-01-01','2026-12-31','Frame intact');
+SELECT * FROM flat_loan_file;
+-- Update anomaly: the phone must be changed in every repeated row.
+-- DELETE FROM flat_loan_file WHERE loan_id=9001; -- deleting may remove the only copy of facts.
+
+-- Suggested measurement procedure for each workload size:
+-- 1) Rebuild the database and load 100, 1000, 10000, then 100000 generated lenders.
+-- 2) Run each Q1-Q8 at least 5 times; record elapsed milliseconds and report the median.
+-- 3) Record result count and count of explicit JOIN operators from each SQL statement.
+-- 4) Use EXPLAIN ANALYZE SELECT ... for execution-plan evidence (MySQL 8.0.18+).
