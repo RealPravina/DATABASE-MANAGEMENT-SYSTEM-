@@ -1,0 +1,655 @@
+-- CSA05 ASSIGNMENT CO2: SWIFTSPAN PARCELS
+-- MySQL 8.0+ SQL implementation and reproducible tests
+-- Save/run this file in MySQL Workbench or the mysql command-line client.
+--
+-- IMPORTANT SCOPE:
+-- This file contains executable SQL for schema design, sample data, operational
+-- queries, views, integrity/anomaly tests and measurements. Mathematical proofs,
+-- relational-algebra/calculus notation, chase tables and written evaluation for
+-- Tasks 1-7 and 9-12 must be submitted separately; SQL alone cannot provide them.
+--
+-- Assumptions needed because the brief does not define these values:
+-- 1. Five service catalog items (ServiceID 1..5) are required for every sender.
+-- 2. Dispatch waves are 1..4.
+-- 3. There are 100 coordinators; assignment is deterministic for repeatability.
+-- 4. RouteGroup is G1..G5, assigned in cohorts of 5,000 senders.
+-- 5. Each route group requires all five services (see RouteGroupRequiredService).
+-- 6. WeightedAdjustedIndex is defined here as Completion * RouteFactor.
+--    Change this expression if your instructor supplies a different formula.
+-- 7. Policy bands/factors below are illustrative fixed fictional policy values.
+--
+-- DATA SIZES:
+-- 10,000 observations = 500 senders x 5 services x 4 waves
+-- 100,000 observations = 5,000 senders x 5 services x 4 waves
+-- 600,000 observations = 30,000 senders x 5 services x 4 waves
+
+DROP DATABASE IF EXISTS swiftspan_co2;
+CREATE DATABASE swiftspan_co2;
+USE swiftspan_co2;
+
+SET SESSION cte_max_recursion_depth = 40000;
+
+-- ================================================================
+-- COMMON CATALOG AND DETERMINISTIC DATA GENERATOR
+-- ================================================================
+
+CREATE TABLE Digits (d TINYINT PRIMARY KEY);
+INSERT INTO Digits VALUES (0),(1),(2),(3),(4),(5),(6),(7),(8),(9);
+
+CREATE TABLE Numbers (
+    n INT PRIMARY KEY
+) ENGINE=InnoDB;
+
+-- Generate 1..30,000 without recursive CTE limits.
+INSERT INTO Numbers(n)
+SELECT 1 + d0.d + 10*d1.d + 100*d2.d + 1000*d3.d + 10000*d4.d
+FROM Digits d0
+CROSS JOIN Digits d1
+CROSS JOIN Digits d2
+CROSS JOIN Digits d3
+CROSS JOIN Digits d4
+WHERE (d0.d + 10*d1.d + 100*d2.d + 1000*d3.d + 10000*d4.d)
+      BETWEEN 0 AND 29999;
+
+CREATE TABLE SenderCatalog (
+    SenderID INT PRIMARY KEY,
+    SenderName VARCHAR(80) NOT NULL,
+    RouteGroup VARCHAR(10) NOT NULL
+) ENGINE=InnoDB;
+
+INSERT INTO SenderCatalog
+SELECT n, CONCAT('Sender-', LPAD(n,5,'0')),
+       CONCAT('G', 1 + FLOOR((n-1)/5000))
+FROM Numbers;
+
+CREATE TABLE ServiceCatalog (
+    ServiceID INT PRIMARY KEY,
+    ServiceCode VARCHAR(20) NOT NULL UNIQUE,
+    ServiceName VARCHAR(80) NOT NULL,
+    VolumeWeight DECIMAL(8,2) NOT NULL,
+    CONSTRAINT chk_service_weight CHECK (VolumeWeight >= 0)
+) ENGINE=InnoDB;
+
+INSERT INTO ServiceCatalog VALUES
+(1,'STD','Standard Parcel',1.00),
+(2,'EXP','Express Parcel',1.25),
+(3,'FRG','Fragile Parcel',1.50),
+(4,'DOC','Document Delivery',0.50),
+(5,'冷','Temperature Controlled',2.00);
+
+CREATE TABLE CoordinatorCatalog (
+    CoordinatorID INT PRIMARY KEY,
+    CoordinatorName VARCHAR(80) NOT NULL,
+    Hub VARCHAR(30) NOT NULL
+) ENGINE=InnoDB;
+
+INSERT INTO CoordinatorCatalog
+SELECT n, CONCAT('Coordinator-',LPAD(n,3,'0')),
+       CONCAT('Hub-',1+MOD(n-1,10))
+FROM Numbers WHERE n <= 100;
+
+CREATE TABLE RouteGroupRequiredService (
+    RouteGroup VARCHAR(10) NOT NULL,
+    ServiceID INT NOT NULL,
+    PRIMARY KEY(RouteGroup, ServiceID),
+    FOREIGN KEY(ServiceID) REFERENCES ServiceCatalog(ServiceID)
+      ON DELETE RESTRICT ON UPDATE RESTRICT
+) ENGINE=InnoDB;
+
+INSERT INTO RouteGroupRequiredService
+SELECT g.RouteGroup, s.ServiceID
+FROM (SELECT DISTINCT RouteGroup FROM SenderCatalog) g
+CROSS JOIN ServiceCatalog s;
+
+-- Fixed fictional Completion -> ServiceBand -> RouteFactor policy.
+CREATE TABLE CompletionPolicy (
+    Completion INT PRIMARY KEY,
+    ServiceBand VARCHAR(20) NOT NULL
+) ENGINE=InnoDB;
+
+INSERT INTO CompletionPolicy
+SELECT n, CASE
+    WHEN n < 40 THEN 'Below Target'
+    WHEN n < 70 THEN 'Standard'
+    ELSE 'Priority'
+END
+FROM Numbers WHERE n BETWEEN 0 AND 100;
+
+CREATE TABLE ServiceBandPolicy (
+    ServiceBand VARCHAR(20) PRIMARY KEY,
+    RouteFactor DECIMAL(6,3) NOT NULL
+) ENGINE=InnoDB;
+
+INSERT INTO ServiceBandPolicy VALUES
+('Below Target',0.800),('Standard',1.000),('Priority',1.200);
+
+-- ================================================================
+-- TASK 1 / TASK 8: THREE DIFFERENT RELATIONAL DESIGNS
+-- Design A: flat repeated-data baseline.
+-- Design B: identity/catalog removed, but coordinator and policy facts
+--           remain repeated in each observation.
+-- Design C: BCNF source design.
+-- ================================================================
+
+CREATE TABLE FlatSwiftSpan (
+    SenderID INT NOT NULL,
+    SenderName VARCHAR(80) NOT NULL,
+    RouteGroup VARCHAR(10) NOT NULL,
+    ServiceID INT NOT NULL,
+    ServiceCode VARCHAR(20) NOT NULL,
+    ServiceName VARCHAR(80) NOT NULL,
+    VolumeWeight DECIMAL(8,2) NOT NULL,
+    CoordinatorID INT NOT NULL,
+    CoordinatorName VARCHAR(80) NOT NULL,
+    Hub VARCHAR(30) NOT NULL,
+    DispatchWave TINYINT NOT NULL,
+    Completion INT NOT NULL,
+    ServiceBand VARCHAR(20) NOT NULL,
+    RouteFactor DECIMAL(6,3) NOT NULL,
+    PRIMARY KEY(SenderID, ServiceID, DispatchWave),
+    CHECK (DispatchWave BETWEEN 1 AND 4),
+    CHECK (Completion BETWEEN 0 AND 100)
+) ENGINE=InnoDB;
+
+-- Partial design: sender/service identity is normalized, but coordinator
+-- details and policy consequences are deliberately retained in observations.
+CREATE TABLE PartialSender (
+    SenderID INT PRIMARY KEY,
+    SenderName VARCHAR(80) NOT NULL,
+    RouteGroup VARCHAR(10) NOT NULL
+) ENGINE=InnoDB;
+
+CREATE TABLE PartialService (
+    ServiceID INT PRIMARY KEY,
+    ServiceCode VARCHAR(20) NOT NULL UNIQUE,
+    ServiceName VARCHAR(80) NOT NULL,
+    VolumeWeight DECIMAL(8,2) NOT NULL
+) ENGINE=InnoDB;
+
+CREATE TABLE PartialObservation (
+    SenderID INT NOT NULL,
+    ServiceID INT NOT NULL,
+    CoordinatorID INT NOT NULL,
+    CoordinatorName VARCHAR(80) NOT NULL,
+    Hub VARCHAR(30) NOT NULL,
+    DispatchWave TINYINT NOT NULL,
+    Completion INT NOT NULL,
+    ServiceBand VARCHAR(20) NOT NULL,
+    RouteFactor DECIMAL(6,3) NOT NULL,
+    PRIMARY KEY(SenderID, ServiceID, DispatchWave),
+    FOREIGN KEY(SenderID) REFERENCES PartialSender(SenderID)
+      ON DELETE RESTRICT ON UPDATE RESTRICT,
+    FOREIGN KEY(ServiceID) REFERENCES PartialService(ServiceID)
+      ON DELETE RESTRICT ON UPDATE RESTRICT,
+    CHECK (DispatchWave BETWEEN 1 AND 4),
+    CHECK (Completion BETWEEN 0 AND 100)
+) ENGINE=InnoDB;
+
+-- BCNF design: each determinant owns the facts it determines.
+CREATE TABLE Sender (
+    SenderID INT PRIMARY KEY,
+    SenderName VARCHAR(80) NOT NULL,
+    RouteGroup VARCHAR(10) NOT NULL
+) ENGINE=InnoDB;
+
+CREATE TABLE Service (
+    ServiceID INT PRIMARY KEY,
+    ServiceCode VARCHAR(20) NOT NULL UNIQUE,
+    ServiceName VARCHAR(80) NOT NULL,
+    VolumeWeight DECIMAL(8,2) NOT NULL,
+    CHECK (VolumeWeight >= 0)
+) ENGINE=InnoDB;
+
+CREATE TABLE Coordinator (
+    CoordinatorID INT PRIMARY KEY,
+    CoordinatorName VARCHAR(80) NOT NULL,
+    Hub VARCHAR(30) NOT NULL
+) ENGINE=InnoDB;
+
+CREATE TABLE Assignment (
+    SenderID INT NOT NULL,
+    ServiceID INT NOT NULL,
+    CoordinatorID INT NOT NULL,
+    PRIMARY KEY(SenderID, ServiceID),
+    FOREIGN KEY(SenderID) REFERENCES Sender(SenderID)
+      ON DELETE RESTRICT ON UPDATE RESTRICT,
+    FOREIGN KEY(ServiceID) REFERENCES Service(ServiceID)
+      ON DELETE RESTRICT ON UPDATE RESTRICT,
+    FOREIGN KEY(CoordinatorID) REFERENCES Coordinator(CoordinatorID)
+      ON DELETE RESTRICT ON UPDATE RESTRICT
+) ENGINE=InnoDB;
+
+CREATE TABLE PolicyCompletion (
+    Completion INT PRIMARY KEY,
+    ServiceBand VARCHAR(20) NOT NULL,
+    CHECK (Completion BETWEEN 0 AND 100)
+) ENGINE=InnoDB;
+
+CREATE TABLE PolicyBand (
+    ServiceBand VARCHAR(20) PRIMARY KEY,
+    RouteFactor DECIMAL(6,3) NOT NULL
+) ENGINE=InnoDB;
+
+CREATE TABLE Observation (
+    SenderID INT NOT NULL,
+    ServiceID INT NOT NULL,
+    DispatchWave TINYINT NOT NULL,
+    Completion INT NOT NULL,
+    PRIMARY KEY(SenderID, ServiceID, DispatchWave),
+    FOREIGN KEY(SenderID, ServiceID)
+      REFERENCES Assignment(SenderID, ServiceID)
+      ON DELETE RESTRICT ON UPDATE RESTRICT,
+    FOREIGN KEY(Completion) REFERENCES PolicyCompletion(Completion)
+      ON DELETE RESTRICT ON UPDATE RESTRICT,
+    CHECK (DispatchWave BETWEEN 1 AND 4),
+    CHECK (Completion BETWEEN 0 AND 100)
+) ENGINE=InnoDB;
+
+-- ================================================================
+-- LOAD THE SAME LOGICAL DATA INTO ALL THREE DESIGNS
+-- The deterministic formula gives reproducible Completion values.
+-- ================================================================
+
+INSERT INTO PartialSender SELECT * FROM SenderCatalog;
+INSERT INTO PartialService SELECT * FROM ServiceCatalog;
+INSERT INTO Sender SELECT * FROM SenderCatalog;
+INSERT INTO Service SELECT * FROM ServiceCatalog;
+INSERT INTO Coordinator SELECT * FROM CoordinatorCatalog;
+INSERT INTO PolicyCompletion SELECT * FROM CompletionPolicy;
+INSERT INTO PolicyBand SELECT * FROM ServiceBandPolicy;
+
+INSERT INTO Assignment(SenderID,ServiceID,CoordinatorID)
+SELECT s.SenderID, c.ServiceID, 1 + MOD(s.SenderID + c.ServiceID - 1,100)
+FROM SenderCatalog s CROSS JOIN ServiceCatalog c;
+
+INSERT INTO Observation(SenderID,ServiceID,DispatchWave,Completion)
+SELECT s.SenderID, c.ServiceID, w.DispatchWave,
+       MOD(s.SenderID*7 + c.ServiceID*13 + w.DispatchWave*17,101)
+FROM SenderCatalog s
+CROSS JOIN ServiceCatalog c
+CROSS JOIN (SELECT 1 AS DispatchWave UNION ALL SELECT 2
+            UNION ALL SELECT 3 UNION ALL SELECT 4) w;
+
+INSERT INTO PartialObservation
+SELECT o.SenderID,o.ServiceID,a.CoordinatorID,co.CoordinatorName,co.Hub,
+       o.DispatchWave,o.Completion,pc.ServiceBand,pb.RouteFactor
+FROM Observation o
+JOIN Assignment a ON a.SenderID=o.SenderID AND a.ServiceID=o.ServiceID
+JOIN Coordinator co ON co.CoordinatorID=a.CoordinatorID
+JOIN PolicyCompletion pc ON pc.Completion=o.Completion
+JOIN PolicyBand pb ON pb.ServiceBand=pc.ServiceBand;
+
+INSERT INTO FlatSwiftSpan
+SELECT o.SenderID,s.SenderName,s.RouteGroup,o.ServiceID,v.ServiceCode,
+       v.ServiceName,v.VolumeWeight,a.CoordinatorID,co.CoordinatorName,co.Hub,
+       o.DispatchWave,o.Completion,pc.ServiceBand,pb.RouteFactor
+FROM Observation o
+JOIN Sender s ON s.SenderID=o.SenderID
+JOIN Service v ON v.ServiceID=o.ServiceID
+JOIN Assignment a ON a.SenderID=o.SenderID AND a.ServiceID=o.ServiceID
+JOIN Coordinator co ON co.CoordinatorID=a.CoordinatorID
+JOIN PolicyCompletion pc ON pc.Completion=o.Completion
+JOIN PolicyBand pb ON pb.ServiceBand=pc.ServiceBand;
+
+-- Verify available populations. Expected observation counts: 10,000 / 100,000 / 600,000.
+SELECT 'Flat' AS DesignName, COUNT(*) AS ObservationRows FROM FlatSwiftSpan
+UNION ALL
+SELECT 'Partial', COUNT(*) FROM PartialObservation
+UNION ALL
+SELECT 'BCNF', COUNT(*) FROM Observation;
+
+-- ================================================================
+-- TASK 7 / TASK 8: FIVE OPERATIONAL QUERIES IN SQL
+-- ================================================================
+
+-- Q1. Actor (sender) 1 observations for DispatchWave=4 and weighted index.
+-- WeightedAdjustedIndex assumption: Completion * RouteFactor.
+SELECT o.SenderID,o.ServiceID,o.DispatchWave,o.Completion,
+       pc.ServiceBand,pb.RouteFactor,
+       (o.Completion * pb.RouteFactor) AS WeightedAdjustedIndex
+FROM Observation o
+JOIN PolicyCompletion pc ON pc.Completion=o.Completion
+JOIN PolicyBand pb ON pb.ServiceBand=pc.ServiceBand
+WHERE o.SenderID=1 AND o.DispatchWave=4
+ORDER BY o.ServiceID;
+
+-- Q2. Sender records meeting threshold 39 for EVERY required service
+-- in their declared RouteGroup. No missing service is silently accepted.
+SELECT s.SenderID,s.SenderName,s.RouteGroup
+FROM Sender s
+WHERE NOT EXISTS (
+    SELECT 1
+    FROM RouteGroupRequiredService r
+    WHERE r.RouteGroup=s.RouteGroup
+      AND NOT EXISTS (
+          SELECT 1
+          FROM Observation o
+          WHERE o.SenderID=s.SenderID
+            AND o.ServiceID=r.ServiceID
+            AND o.Completion >= 39
+      )
+);
+
+-- Q3. Observed service records with no value below 39 in period 4.
+-- The EXISTS clause prevents unobserved service items being included.
+SELECT s.SenderID,s.SenderName,v.ServiceID,v.ServiceCode,v.ServiceName
+FROM Sender s
+JOIN Assignment a ON a.SenderID=s.SenderID
+JOIN Service v ON v.ServiceID=a.ServiceID
+WHERE EXISTS (
+    SELECT 1 FROM Observation o
+    WHERE o.SenderID=s.SenderID AND o.ServiceID=v.ServiceID
+      AND o.DispatchWave=4
+)
+AND NOT EXISTS (
+    SELECT 1 FROM Observation o
+    WHERE o.SenderID=s.SenderID AND o.ServiceID=v.ServiceID
+      AND o.DispatchWave=4 AND o.Completion < 39
+)
+ORDER BY s.SenderID,v.ServiceID;
+
+-- Q4. Coordinator means below the observation-weighted mean of their hub.
+-- Hub mean weights every observation equally, not each coordinator equally.
+WITH CoordinatorMeans AS (
+    SELECT a.CoordinatorID,co.CoordinatorName,co.Hub,
+           AVG(o.Completion) AS CoordinatorMean
+    FROM Assignment a
+    JOIN Coordinator co ON co.CoordinatorID=a.CoordinatorID
+    JOIN Observation o ON o.SenderID=a.SenderID AND o.ServiceID=a.ServiceID
+    GROUP BY a.CoordinatorID,co.CoordinatorName,co.Hub
+),
+HubMeans AS (
+    SELECT co.Hub,AVG(o.Completion) AS HubObservationMean
+    FROM Assignment a
+    JOIN Coordinator co ON co.CoordinatorID=a.CoordinatorID
+    JOIN Observation o ON o.SenderID=a.SenderID AND o.ServiceID=a.ServiceID
+    GROUP BY co.Hub
+)
+SELECT cm.CoordinatorID,cm.CoordinatorName,cm.Hub,
+       cm.CoordinatorMean,hm.HubObservationMean
+FROM CoordinatorMeans cm
+JOIN HubMeans hm ON hm.Hub=cm.Hub
+WHERE cm.CoordinatorMean < hm.HubObservationMean
+ORDER BY cm.Hub,cm.CoordinatorMean;
+
+-- Q5. Sender records with sub-threshold observations in at least
+-- three distinct DispatchWave values.
+SELECT s.SenderID,s.SenderName,COUNT(DISTINCT o.DispatchWave) AS LowWaveCount
+FROM Sender s
+JOIN Observation o ON o.SenderID=s.SenderID
+WHERE o.Completion < 39
+GROUP BY s.SenderID,s.SenderName
+HAVING COUNT(DISTINCT o.DispatchWave) >= 3
+ORDER BY s.SenderID;
+
+-- ================================================================
+-- TASK 8: PURPOSE-SPECIFIC VIEWS
+-- Views expose columns for a purpose; they do not automatically
+-- enforce row-level identity or authorization.
+-- ================================================================
+
+CREATE OR REPLACE VIEW vw_sender_actor AS
+SELECT SenderID,SenderName,RouteGroup FROM Sender;
+
+CREATE OR REPLACE VIEW vw_operational_tracking AS
+SELECT o.SenderID,s.SenderName,s.RouteGroup,o.ServiceID,v.ServiceCode,
+       v.ServiceName,o.DispatchWave,o.Completion,pc.ServiceBand,pb.RouteFactor,
+       a.CoordinatorID,co.CoordinatorName,co.Hub
+FROM Observation o
+JOIN Sender s ON s.SenderID=o.SenderID
+JOIN Service v ON v.ServiceID=o.ServiceID
+JOIN Assignment a ON a.SenderID=o.SenderID AND a.ServiceID=o.ServiceID
+JOIN Coordinator co ON co.CoordinatorID=a.CoordinatorID
+JOIN PolicyCompletion pc ON pc.Completion=o.Completion
+JOIN PolicyBand pb ON pb.ServiceBand=pc.ServiceBand;
+
+-- Run these privilege examples only if the named accounts exist and
+-- your MySQL user has GRANT OPTION. They are examples, not auto-executed.
+-- CREATE USER 'tracking_reader'@'localhost' IDENTIFIED BY 'ChangeThisPassword!';
+-- GRANT SELECT ON swiftspan_co2.vw_operational_tracking
+--   TO 'tracking_reader'@'localhost';
+-- REVOKE SELECT ON swiftspan_co2.vw_operational_tracking
+--   FROM 'tracking_reader'@'localhost';
+
+-- ================================================================
+-- TASK 4 / TASK 8: ANOMALY DEMONSTRATIONS
+-- Use transactions and ROLLBACK so the test does not damage base data.
+-- ================================================================
+
+-- Update anomaly: one sender-name fact appears in many flat rows.
+SELECT COUNT(*) AS FlatRowsForSender1
+FROM FlatSwiftSpan WHERE SenderID=1;
+
+START TRANSACTION;
+UPDATE FlatSwiftSpan
+SET SenderName='Corrected Sender One'
+WHERE SenderID=1;
+SELECT ROW_COUNT() AS FlatRowsChangedForSenderName;
+ROLLBACK;
+
+-- Same logical sender-name change in BCNF updates exactly one sender row.
+START TRANSACTION;
+UPDATE Sender SET SenderName='Corrected Sender One' WHERE SenderID=1;
+SELECT ROW_COUNT() AS BCNFSenderRowsChanged;
+ROLLBACK;
+
+-- Coordinator-name update repetition in the partial design.
+SELECT COUNT(*) AS PartialRowsForCoordinator1
+FROM PartialObservation WHERE CoordinatorID=1;
+
+START TRANSACTION;
+UPDATE PartialObservation
+SET CoordinatorName='Temporary Coordinator Name'
+WHERE CoordinatorID=1;
+SELECT ROW_COUNT() AS PartialRowsChangedForCoordinatorName;
+ROLLBACK;
+
+-- ServiceName inconsistency can be stored in the flat baseline because
+-- it has no FK/UNIQUE rule connecting repeated ServiceID to ServiceName.
+START TRANSACTION;
+UPDATE FlatSwiftSpan
+SET ServiceName='Inconsistent Service Label'
+WHERE ServiceID=1 AND SenderID=1 AND DispatchWave=1;
+SELECT SenderID,ServiceID,DispatchWave,ServiceName
+FROM FlatSwiftSpan WHERE ServiceID=1 AND SenderID=1;
+ROLLBACK;
+
+-- Insertion anomaly: flat table cannot store a service-only catalog fact
+-- without inventing an observation. The normalized Service table can.
+START TRANSACTION;
+INSERT INTO Service(ServiceID,ServiceCode,ServiceName,VolumeWeight)
+VALUES (99,'NEW99','New Catalog Service',0.75);
+SELECT * FROM Service WHERE ServiceID=99;
+ROLLBACK;
+
+-- Deletion anomaly demonstration: deleting the last observation in a flat
+-- table also deletes the only copy of its service description in that row.
+-- The normalized Service catalog remains independently stored.
+START TRANSACTION;
+DELETE FROM FlatSwiftSpan
+WHERE SenderID=1 AND ServiceID=1;
+SELECT COUNT(*) AS FlatRowsForService1AfterDelete
+FROM FlatSwiftSpan WHERE ServiceID=1;
+SELECT * FROM Service WHERE ServiceID=1;
+ROLLBACK;
+
+-- ================================================================
+-- TASK 6: ILLUSTRATIVE 4NF AND 5NF STRUCTURES
+-- 4NF: independent approved modes and document types for a service.
+-- ================================================================
+
+CREATE TABLE ServiceTransportMode (
+    ServiceID INT NOT NULL,
+    TransportMode VARCHAR(30) NOT NULL,
+    PRIMARY KEY(ServiceID,TransportMode),
+    FOREIGN KEY(ServiceID) REFERENCES Service(ServiceID)
+      ON DELETE RESTRICT ON UPDATE RESTRICT
+) ENGINE=InnoDB;
+
+CREATE TABLE ServiceDocumentType (
+    ServiceID INT NOT NULL,
+    DocumentType VARCHAR(30) NOT NULL,
+    PRIMARY KEY(ServiceID,DocumentType),
+    FOREIGN KEY(ServiceID) REFERENCES Service(ServiceID)
+      ON DELETE RESTRICT ON UPDATE RESTRICT
+) ENGINE=InnoDB;
+
+INSERT INTO ServiceTransportMode VALUES
+(1,'Road'),(1,'Rail'),(2,'Road'),(2,'Air');
+INSERT INTO ServiceDocumentType VALUES
+(1,'Invoice'),(1,'Label'),(2,'Invoice'),(2,'Customs Form');
+
+-- 5NF illustration: pairwise approvals.
+CREATE TABLE OperatorItemApproval (
+    OperatorCode VARCHAR(20) NOT NULL,
+    ItemCode VARCHAR(20) NOT NULL,
+    PRIMARY KEY(OperatorCode,ItemCode)
+) ENGINE=InnoDB;
+
+CREATE TABLE OperatorChannelApproval (
+    OperatorCode VARCHAR(20) NOT NULL,
+    ChannelCode VARCHAR(20) NOT NULL,
+    PRIMARY KEY(OperatorCode,ChannelCode)
+) ENGINE=InnoDB;
+
+CREATE TABLE ItemChannelApproval (
+    ItemCode VARCHAR(20) NOT NULL,
+    ChannelCode VARCHAR(20) NOT NULL,
+    PRIMARY KEY(ItemCode,ChannelCode)
+) ENGINE=InnoDB;
+
+INSERT INTO OperatorItemApproval VALUES ('OP1','IT1'),('OP1','IT2');
+INSERT INTO OperatorChannelApproval VALUES ('OP1','WEB'),('OP1','MOB');
+INSERT INTO ItemChannelApproval VALUES ('IT1','WEB'),('IT2','MOB');
+
+-- Three-way combinations reconstructed from all three pairwise approvals.
+SELECT oi.OperatorCode,oi.ItemCode,oc.ChannelCode
+FROM OperatorItemApproval oi
+JOIN OperatorChannelApproval oc
+  ON oc.OperatorCode=oi.OperatorCode
+JOIN ItemChannelApproval ic
+  ON ic.ItemCode=oi.ItemCode AND ic.ChannelCode=oc.ChannelCode;
+
+-- ================================================================
+-- TASK 9: EXPERIMENTAL COUNTS, STORAGE AND QUERY PLAN
+-- These are measurements from the local MySQL instance, not predictions.
+-- Run each population size separately by changing @target_senders and
+-- reloading/truncating tables if a separate 10k / 100k / 600k run is needed.
+-- The full script currently loads the 600,000-observation population.
+-- ================================================================
+
+SELECT TABLE_NAME, TABLE_ROWS, DATA_LENGTH, INDEX_LENGTH,
+       DATA_LENGTH + INDEX_LENGTH AS ApproxAllocatedBytes
+FROM information_schema.TABLES
+WHERE TABLE_SCHEMA=DATABASE()
+  AND TABLE_NAME IN ('FlatSwiftSpan','PartialObservation','Observation',
+                     'Sender','Service','Assignment','Coordinator',
+                     'PolicyCompletion','PolicyBand')
+ORDER BY TABLE_NAME;
+
+-- Count repeated rows affected by catalog/operator fact changes.
+SELECT 'Flat sender-name copies' AS Measurement,COUNT(*) AS RowsAffected
+FROM FlatSwiftSpan WHERE SenderID=1
+UNION ALL
+SELECT 'Partial coordinator-name copies',COUNT(*)
+FROM PartialObservation WHERE CoordinatorID=1
+UNION ALL
+SELECT 'BCNF sender fact rows',COUNT(*)
+FROM Sender WHERE SenderID=1
+UNION ALL
+SELECT 'BCNF coordinator fact rows',COUNT(*)
+FROM Coordinator WHERE CoordinatorID=1;
+
+-- Use EXPLAIN ANALYZE (MySQL 8.0.18+) to obtain actual iterator timings.
+EXPLAIN ANALYZE
+SELECT SenderID,ServiceID,DispatchWave,Completion
+FROM Observation
+WHERE SenderID=1 AND DispatchWave=4;
+
+EXPLAIN ANALYZE
+SELECT SenderID,ServiceID,DispatchWave,Completion,ServiceName,CoordinatorName
+FROM vw_operational_tracking
+WHERE SenderID=1 AND DispatchWave=4;
+
+-- Example elapsed-time measurement using microsecond timestamps.
+SET @t0 = NOW(6);
+SELECT COUNT(*) INTO @result_count
+FROM Observation
+WHERE SenderID=1 AND DispatchWave=4;
+SET @elapsed_us = TIMESTAMPDIFF(MICROSECOND,@t0,NOW(6));
+SELECT @result_count AS ResultRows,@elapsed_us AS ElapsedMicroseconds;
+
+-- ================================================================
+-- TASK 12: READ-CARD OPTION FOR 55,000 LOOKUPS/HOUR
+-- 55,000 / 3,600 = 15.28 requests/second on average.
+-- A transactional read card is a controlled projection, not a replacement
+-- for normalized source tables. Refresh it in the same transaction as
+-- reconciled corrections, or rebuild affected sender/service rows.
+-- ================================================================
+
+CREATE TABLE TrackingReadCard (
+    SenderID INT NOT NULL,
+    ServiceID INT NOT NULL,
+    DispatchWave TINYINT NOT NULL,
+    SenderName VARCHAR(80) NOT NULL,
+    RouteGroup VARCHAR(10) NOT NULL,
+    ServiceCode VARCHAR(20) NOT NULL,
+    ServiceName VARCHAR(80) NOT NULL,
+    CoordinatorName VARCHAR(80) NOT NULL,
+    Hub VARCHAR(30) NOT NULL,
+    Completion INT NOT NULL,
+    ServiceBand VARCHAR(20) NOT NULL,
+    RouteFactor DECIMAL(6,3) NOT NULL,
+    PRIMARY KEY(SenderID,ServiceID,DispatchWave)
+) ENGINE=InnoDB;
+
+-- Initial snapshot build.
+INSERT INTO TrackingReadCard
+SELECT SenderID,ServiceID,DispatchWave,SenderName,RouteGroup,ServiceCode,
+       ServiceName,CoordinatorName,Hub,Completion,ServiceBand,RouteFactor
+FROM vw_operational_tracking;
+
+-- Fast indexed tracking lookup.
+SELECT *
+FROM TrackingReadCard
+WHERE SenderID=1 AND DispatchWave=4
+ORDER BY ServiceID;
+
+-- Example refresh for one sender after its reconciled correction.
+-- Execute this DELETE + INSERT in the same transaction as the source change.
+START TRANSACTION;
+DELETE FROM TrackingReadCard WHERE SenderID=1;
+INSERT INTO TrackingReadCard
+SELECT SenderID,ServiceID,DispatchWave,SenderName,RouteGroup,ServiceCode,
+       ServiceName,CoordinatorName,Hub,Completion,ServiceBand,RouteFactor
+FROM vw_operational_tracking
+WHERE SenderID=1;
+COMMIT;
+
+-- Validate card/source equivalence after refresh (both counts should match).
+SELECT
+ (SELECT COUNT(*) FROM TrackingReadCard WHERE SenderID=1) AS CardRows,
+ (SELECT COUNT(*) FROM vw_operational_tracking WHERE SenderID=1) AS SourceRows;
+
+-- Compare storage including the optional read card.
+SELECT TABLE_NAME,TABLE_ROWS,DATA_LENGTH,INDEX_LENGTH,
+       DATA_LENGTH+INDEX_LENGTH AS ApproxAllocatedBytes
+FROM information_schema.TABLES
+WHERE TABLE_SCHEMA=DATABASE()
+  AND TABLE_NAME IN ('Observation','TrackingReadCard');
+
+-- ================================================================
+-- OPTIONAL POPULATION CHECKS
+-- Full data set: 30,000 senders, 5 services, 4 waves = 600,000 observations.
+-- Smaller reproducible populations can be obtained by limiting SenderCatalog
+-- to first 500 or 5,000 senders before loading all three designs.
+-- Do not simply delete senders after loading if you need clean benchmark runs.
+-- ================================================================
+
+SELECT COUNT(*) AS SenderCount FROM Sender;
+SELECT COUNT(*) AS AssignmentCount FROM Assignment;
+SELECT COUNT(*) AS ObservationCount FROM Observation;
+SELECT COUNT(*) AS PartialObservationCount FROM PartialObservation;
+SELECT COUNT(*) AS FlatObservationCount FROM FlatSwiftSpan;
+
+-- End of SQL script.
