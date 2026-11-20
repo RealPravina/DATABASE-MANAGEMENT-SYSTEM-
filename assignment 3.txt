@@ -1,0 +1,333 @@
+-- CSA05 DBMS Assignment 3 (CO3): ShopNest
+-- MySQL 8.0+ | Copy and execute section-by-section.
+-- This script creates the UNNORMALISED, 3NF/BCNF, and 4NF/5NF schemas.
+-- Sample data is intentionally small for demonstration; use Python to generate larger datasets.
+
+CREATE DATABASE IF NOT EXISTS shopnest_assignment;
+USE shopnest_assignment;
+
+-- =========================================================
+-- 1) UNNORMALISED SCHEMA (UNF): repeating TagList/ColourList
+-- =========================================================
+DROP TABLE IF EXISTS ORDER_LINE_UNF;
+CREATE TABLE ORDER_LINE_UNF (
+    OrderID INT NOT NULL,
+    OrderDate DATE NOT NULL,
+    CustomerID INT NOT NULL,
+    CustomerName VARCHAR(100) NOT NULL,
+    CustomerEmail VARCHAR(150) NOT NULL,
+    ShipStreet VARCHAR(150) NOT NULL,
+    ShipCity VARCHAR(100) NOT NULL,
+    ShipPIN VARCHAR(10) NOT NULL,
+    ShipState VARCHAR(100) NOT NULL,
+    ProductID INT NOT NULL,
+    ProductName VARCHAR(150) NOT NULL,
+    UnitPrice DECIMAL(10,2) NOT NULL CHECK (UnitPrice >= 0),
+    CategoryID INT NOT NULL,
+    CategoryName VARCHAR(100) NOT NULL,
+    SupplierID INT NOT NULL,
+    SupplierName VARCHAR(100) NOT NULL,
+    SupplierPhone VARCHAR(20) NOT NULL,
+    Quantity INT NOT NULL CHECK (Quantity > 0),
+    WarehouseID INT NOT NULL,
+    WarehouseCity VARCHAR(100) NOT NULL,
+    TagList VARCHAR(500),
+    ColourList VARCHAR(500),
+    PRIMARY KEY (OrderID, ProductID)
+);
+
+INSERT INTO ORDER_LINE_UNF VALUES
+(1001,'2026-11-01',1,'Anu','anu@example.com','12 Main St','Coimbatore','641001','Tamil Nadu',501,'Keyboard',1200.00,10,'Accessories',201,'ABC Supplies','9876500001',2,301,'Coimbatore','computer;typing','black;white'),
+(1001,'2026-11-01',1,'Anu','anu@example.com','12 Main St','Coimbatore','641001','Tamil Nadu',502,'Mouse',500.00,10,'Accessories',201,'ABC Supplies','9876500001',1,301,'Coimbatore','computer;wireless','black;blue'),
+(1002,'2026-11-02',2,'Bala','bala@example.com','5 Lake Rd','Chennai','600001','Tamil Nadu',501,'Keyboard',1200.00,10,'Accessories',201,'ABC Supplies','9876500001',1,302,'Chennai','computer;typing','black;white');
+
+-- UNF anomaly demonstrations (run individually; rollback if desired)
+-- Update supplier phone repeated in rows:
+UPDATE ORDER_LINE_UNF SET SupplierPhone='9876500099' WHERE SupplierID=201;
+-- Insert anomaly: a product/supplier fact cannot be stored without an order line:
+-- INSERT INTO ORDER_LINE_UNF (...) VALUES (...); -- needs a full order line
+-- Delete anomaly demonstration (delete an order line and potentially lose repeated facts):
+-- DELETE FROM ORDER_LINE_UNF WHERE OrderID=1002 AND ProductID=501;
+
+-- =========================================================
+-- 2) NORMALISED SCHEMA: 3NF/BCNF core relations
+-- =========================================================
+DROP TABLE IF EXISTS ORDER_ITEM;
+DROP TABLE IF EXISTS ORDERS;
+DROP TABLE IF EXISTS CUSTOMER;
+DROP TABLE IF EXISTS ADDRESS;
+DROP TABLE IF EXISTS PRODUCT;
+DROP TABLE IF EXISTS CATEGORY;
+DROP TABLE IF EXISTS SUPPLIER;
+DROP TABLE IF EXISTS WAREHOUSE;
+DROP TABLE IF EXISTS PIN_LOCATION;
+
+CREATE TABLE CUSTOMER (
+    CustomerID INT PRIMARY KEY,
+    CustomerName VARCHAR(100) NOT NULL,
+    CustomerEmail VARCHAR(150) NOT NULL UNIQUE
+);
+
+CREATE TABLE PIN_LOCATION (
+    ShipPIN VARCHAR(10) PRIMARY KEY,
+    ShipCity VARCHAR(100) NOT NULL,
+    ShipState VARCHAR(100) NOT NULL
+);
+
+CREATE TABLE ADDRESS (
+    AddressID INT PRIMARY KEY,
+    ShipStreet VARCHAR(150) NOT NULL,
+    ShipCity VARCHAR(100) NOT NULL,
+    ShipPIN VARCHAR(10) NOT NULL,
+    FOREIGN KEY (ShipPIN) REFERENCES PIN_LOCATION(ShipPIN)
+);
+
+CREATE TABLE CATEGORY (
+    CategoryID INT PRIMARY KEY,
+    CategoryName VARCHAR(100) NOT NULL UNIQUE
+);
+
+CREATE TABLE SUPPLIER (
+    SupplierID INT PRIMARY KEY,
+    SupplierName VARCHAR(100) NOT NULL,
+    SupplierPhone VARCHAR(20) NOT NULL
+);
+
+CREATE TABLE PRODUCT (
+    ProductID INT PRIMARY KEY,
+    ProductName VARCHAR(150) NOT NULL,
+    UnitPrice DECIMAL(10,2) NOT NULL CHECK (UnitPrice >= 0),
+    CategoryID INT NOT NULL,
+    SupplierID INT NOT NULL,
+    FOREIGN KEY (CategoryID) REFERENCES CATEGORY(CategoryID),
+    FOREIGN KEY (SupplierID) REFERENCES SUPPLIER(SupplierID)
+);
+
+CREATE TABLE WAREHOUSE (
+    WarehouseID INT PRIMARY KEY,
+    WarehouseCity VARCHAR(100) NOT NULL
+);
+
+CREATE TABLE ORDERS (
+    OrderID INT PRIMARY KEY,
+    OrderDate DATE NOT NULL,
+    CustomerID INT NOT NULL,
+    AddressID INT NOT NULL,
+    FOREIGN KEY (CustomerID) REFERENCES CUSTOMER(CustomerID),
+    FOREIGN KEY (AddressID) REFERENCES ADDRESS(AddressID)
+);
+
+CREATE TABLE ORDER_ITEM (
+    OrderID INT NOT NULL,
+    ProductID INT NOT NULL,
+    Quantity INT NOT NULL CHECK (Quantity > 0),
+    WarehouseID INT NOT NULL,
+    PRIMARY KEY (OrderID, ProductID),
+    FOREIGN KEY (OrderID) REFERENCES ORDERS(OrderID),
+    FOREIGN KEY (ProductID) REFERENCES PRODUCT(ProductID),
+    FOREIGN KEY (WarehouseID) REFERENCES WAREHOUSE(WarehouseID)
+);
+
+-- Sample data for 3NF/BCNF tables
+INSERT INTO CUSTOMER VALUES (1,'Anu','anu@example.com'),(2,'Bala','bala@example.com');
+INSERT INTO PIN_LOCATION VALUES ('641001','Coimbatore','Tamil Nadu'),('600001','Chennai','Tamil Nadu');
+INSERT INTO ADDRESS VALUES (1,'12 Main St','Coimbatore','641001'),(2,'5 Lake Rd','Chennai','600001');
+INSERT INTO CATEGORY VALUES (10,'Accessories');
+INSERT INTO SUPPLIER VALUES (201,'ABC Supplies','9876500001');
+INSERT INTO PRODUCT VALUES (501,'Keyboard',1200.00,10,201),(502,'Mouse',500.00,10,201);
+INSERT INTO WAREHOUSE VALUES (301,'Coimbatore'),(302,'Chennai');
+INSERT INTO ORDERS VALUES (1001,'2026-11-01',1,1),(1002,'2026-11-02',2,2);
+INSERT INTO ORDER_ITEM VALUES (1001,501,2,301),(1001,502,1,301),(1002,501,1,302);
+
+-- =========================================================
+-- 3) 4NF: independent tags and colours (no tag-colour cross product)
+-- =========================================================
+DROP TABLE IF EXISTS PRODUCT_COLOUR;
+DROP TABLE IF EXISTS PRODUCT_TAG;
+
+CREATE TABLE PRODUCT_TAG (
+    ProductID INT NOT NULL,
+    Tag VARCHAR(80) NOT NULL,
+    PRIMARY KEY (ProductID, Tag),
+    FOREIGN KEY (ProductID) REFERENCES PRODUCT(ProductID)
+);
+
+CREATE TABLE PRODUCT_COLOUR (
+    ProductID INT NOT NULL,
+    Colour VARCHAR(80) NOT NULL,
+    PRIMARY KEY (ProductID, Colour),
+    FOREIGN KEY (ProductID) REFERENCES PRODUCT(ProductID)
+);
+
+INSERT INTO PRODUCT_TAG VALUES (501,'computer'),(501,'typing'),(502,'computer'),(502,'wireless');
+INSERT INTO PRODUCT_COLOUR VALUES (501,'black'),(501,'white'),(502,'black'),(502,'blue');
+
+-- BCNF but not 4NF comparison relation: every tag-colour combination
+DROP TABLE IF EXISTS PRODUCT_TAG_COLOUR;
+CREATE TABLE PRODUCT_TAG_COLOUR (
+    ProductID INT NOT NULL,
+    Tag VARCHAR(80) NOT NULL,
+    Colour VARCHAR(80) NOT NULL,
+    PRIMARY KEY (ProductID, Tag, Colour),
+    FOREIGN KEY (ProductID) REFERENCES PRODUCT(ProductID)
+);
+INSERT INTO PRODUCT_TAG_COLOUR VALUES
+(501,'computer','black'),(501,'computer','white'),
+(501,'typing','black'),(501,'typing','white');
+
+-- =========================================================
+-- 4) 5NF supply relation and its projections
+-- =========================================================
+DROP TABLE IF EXISTS SUPPLIER_CATEGORY_WAREHOUSE;
+DROP TABLE IF EXISTS SUPPLIER_WAREHOUSE;
+DROP TABLE IF EXISTS CATEGORY_WAREHOUSE;
+DROP TABLE IF EXISTS SUPPLIER_CATEGORY;
+
+CREATE TABLE SUPPLIER_CATEGORY (
+    SupplierID INT NOT NULL,
+    CategoryID INT NOT NULL,
+    PRIMARY KEY (SupplierID, CategoryID),
+    FOREIGN KEY (SupplierID) REFERENCES SUPPLIER(SupplierID),
+    FOREIGN KEY (CategoryID) REFERENCES CATEGORY(CategoryID)
+);
+
+CREATE TABLE CATEGORY_WAREHOUSE (
+    CategoryID INT NOT NULL,
+    WarehouseID INT NOT NULL,
+    PRIMARY KEY (CategoryID, WarehouseID),
+    FOREIGN KEY (CategoryID) REFERENCES CATEGORY(CategoryID),
+    FOREIGN KEY (WarehouseID) REFERENCES WAREHOUSE(WarehouseID)
+);
+
+CREATE TABLE SUPPLIER_WAREHOUSE (
+    SupplierID INT NOT NULL,
+    WarehouseID INT NOT NULL,
+    PRIMARY KEY (SupplierID, WarehouseID),
+    FOREIGN KEY (SupplierID) REFERENCES SUPPLIER(SupplierID),
+    FOREIGN KEY (WarehouseID) REFERENCES WAREHOUSE(WarehouseID)
+);
+
+-- Three-way original relation, for demonstration/testing:
+CREATE TABLE SUPPLIER_CATEGORY_WAREHOUSE (
+    SupplierID INT NOT NULL,
+    CategoryID INT NOT NULL,
+    WarehouseID INT NOT NULL,
+    PRIMARY KEY (SupplierID, CategoryID, WarehouseID),
+    FOREIGN KEY (SupplierID) REFERENCES SUPPLIER(SupplierID),
+    FOREIGN KEY (CategoryID) REFERENCES CATEGORY(CategoryID),
+    FOREIGN KEY (WarehouseID) REFERENCES WAREHOUSE(WarehouseID)
+);
+
+INSERT INTO SUPPLIER_CATEGORY VALUES (201,10);
+INSERT INTO CATEGORY_WAREHOUSE VALUES (10,301),(10,302);
+INSERT INTO SUPPLIER_WAREHOUSE VALUES (201,301),(201,302);
+INSERT INTO SUPPLIER_CATEGORY_WAREHOUSE VALUES (201,10,301),(201,10,302);
+
+-- =========================================================
+-- 5) DESIGN CHALLENGE: store historical paid price per item
+-- =========================================================
+-- Add PricePaid to ORDER_ITEM so old orders retain their actual price.
+ALTER TABLE ORDER_ITEM ADD COLUMN PricePaid DECIMAL(10,2) NOT NULL DEFAULT 0
+    CHECK (PricePaid >= 0);
+UPDATE ORDER_ITEM oi JOIN PRODUCT p ON oi.ProductID=p.ProductID
+SET oi.PricePaid=p.UnitPrice WHERE oi.PricePaid=0;
+
+-- Price history, optional alternative for product price changes:
+DROP TABLE IF EXISTS PRODUCT_PRICE_HISTORY;
+CREATE TABLE PRODUCT_PRICE_HISTORY (
+    ProductID INT NOT NULL,
+    EffectiveFrom DATETIME NOT NULL,
+    EffectiveTo DATETIME NULL,
+    Price DECIMAL(10,2) NOT NULL CHECK (Price >= 0),
+    PRIMARY KEY (ProductID, EffectiveFrom),
+    FOREIGN KEY (ProductID) REFERENCES PRODUCT(ProductID),
+    CHECK (EffectiveTo IS NULL OR EffectiveTo > EffectiveFrom)
+);
+
+-- =========================================================
+-- 6) Useful query examples
+-- =========================================================
+-- Order history with customer, product, supplier, category and warehouse:
+SELECT o.OrderID, o.OrderDate, c.CustomerName, p.ProductName,
+       oi.Quantity, oi.PricePaid, s.SupplierName, cat.CategoryName,
+       w.WarehouseCity
+FROM ORDERS o
+JOIN CUSTOMER c ON c.CustomerID=o.CustomerID
+JOIN ORDER_ITEM oi ON oi.OrderID=o.OrderID
+JOIN PRODUCT p ON p.ProductID=oi.ProductID
+JOIN SUPPLIER s ON s.SupplierID=p.SupplierID
+JOIN CATEGORY cat ON cat.CategoryID=p.CategoryID
+JOIN WAREHOUSE w ON w.WarehouseID=oi.WarehouseID
+ORDER BY o.OrderDate DESC, o.OrderID;
+
+-- Customer order history:
+SELECT o.OrderID, o.OrderDate, p.ProductName, oi.Quantity, oi.PricePaid
+FROM ORDERS o
+JOIN ORDER_ITEM oi ON oi.OrderID=o.OrderID
+JOIN PRODUCT p ON p.ProductID=oi.ProductID
+WHERE o.CustomerID=1
+ORDER BY o.OrderDate DESC;
+
+-- Supplier phone update (one fact, one row):
+UPDATE SUPPLIER SET SupplierPhone='9876500099' WHERE SupplierID=201;
+
+-- Product current price update:
+UPDATE PRODUCT SET UnitPrice=1250.00 WHERE ProductID=501;
+
+-- Tags for a product:
+SELECT Tag FROM PRODUCT_TAG WHERE ProductID=501;
+-- Colours for a product:
+SELECT Colour FROM PRODUCT_COLOUR WHERE ProductID=501;
+
+-- Reconstruct independent tag/colour combinations (not usually needed):
+SELECT t.ProductID, t.Tag, c.Colour
+FROM PRODUCT_TAG t JOIN PRODUCT_COLOUR c ON c.ProductID=t.ProductID
+WHERE t.ProductID=501;
+
+-- =========================================================
+-- 7) Indexes for order-history query workload
+-- =========================================================
+CREATE INDEX idx_orders_customer_date ON ORDERS(CustomerID, OrderDate);
+CREATE INDEX idx_order_item_product ON ORDER_ITEM(ProductID);
+CREATE INDEX idx_order_item_warehouse ON ORDER_ITEM(WarehouseID);
+CREATE INDEX idx_product_supplier_category ON PRODUCT(SupplierID, CategoryID);
+
+-- =========================================================
+-- 8) Basic integrity/boundary-case test examples
+-- =========================================================
+-- These should succeed:
+INSERT INTO CUSTOMER VALUES (3,'Test Customer','test@example.com');
+-- Product never ordered:
+INSERT INTO PRODUCT VALUES (503,'Unused Product',99.00,10,201);
+-- Product with no tags/colours: no PRODUCT_TAG or PRODUCT_COLOUR rows needed.
+-- Deleting an order is restricted if its order items remain; delete items first:
+-- DELETE FROM ORDER_ITEM WHERE OrderID=1002;
+-- DELETE FROM ORDERS WHERE OrderID=1002;
+-- Attempting quantity zero should fail CHECK:
+-- INSERT INTO ORDER_ITEM VALUES (1002,502,0,302,500.00);
+-- Attempting duplicate email should fail UNIQUE:
+-- INSERT INTO CUSTOMER VALUES (4,'Duplicate','anu@example.com');
+
+-- =========================================================
+-- 9) Inspection/measurement queries
+-- =========================================================
+SELECT TABLE_NAME, TABLE_ROWS
+FROM information_schema.tables
+WHERE table_schema='shopnest_assignment';
+
+-- Storage size per table (approximate, bytes):
+SELECT TABLE_NAME, DATA_LENGTH + INDEX_LENGTH AS TotalBytes
+FROM information_schema.tables
+WHERE table_schema='shopnest_assignment'
+ORDER BY TotalBytes DESC;
+
+-- Explain plan for order-history query:
+EXPLAIN
+SELECT o.OrderID, o.OrderDate, c.CustomerName, p.ProductName,
+       oi.Quantity, oi.PricePaid
+FROM ORDERS o JOIN CUSTOMER c ON c.CustomerID=o.CustomerID
+JOIN ORDER_ITEM oi ON oi.OrderID=o.OrderID
+JOIN PRODUCT p ON p.ProductID=oi.ProductID
+WHERE o.CustomerID=1;
+
+-- End of script.
