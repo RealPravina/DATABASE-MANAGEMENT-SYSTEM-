@@ -1,0 +1,138 @@
+-- CSA05 CO4 Assignment 4: SQL queries (MySQL 8.0+)
+-- Run in a MySQL database/schema of your choice.
+-- This script creates a table, sample data, indexes, and benchmark queries.
+
+CREATE DATABASE IF NOT EXISTS bank_txn_lab;
+USE bank_txn_lab;
+
+DROP TABLE IF EXISTS TXN;
+CREATE TABLE TXN (
+    TxnID BIGINT UNSIGNED NOT NULL,
+    AccountNo VARCHAR(12) NOT NULL,
+    TxnTime DATETIME NOT NULL,
+    Type CHAR(1) NOT NULL,
+    Amount DECIMAL(12,2) NOT NULL,
+    Branch VARCHAR(20) NOT NULL,
+    Channel VARCHAR(10) NOT NULL,
+    Narration VARCHAR(80),
+    Balance DECIMAL(12,2) NOT NULL,
+    OtherData VARCHAR(45),
+    PRIMARY KEY (TxnID)
+) ENGINE=InnoDB;
+
+-- Generate 10,000 sample rows. Change the cross-join multiplier or insert
+-- additional batches to reach 100,000 or 1,000,000 rows.
+INSERT INTO TXN (TxnID, AccountNo, TxnTime, Type, Amount, Branch, Channel, Narration, Balance, OtherData)
+WITH digits AS (
+    SELECT 0 n UNION SELECT 1 UNION SELECT 2 UNION SELECT 3 UNION SELECT 4
+    UNION SELECT 5 UNION SELECT 6 UNION SELECT 7 UNION SELECT 8 UNION SELECT 9
+),
+nums AS (
+    SELECT (a.n*1000+b.n*100+c.n*10+d.n)+1 AS n
+    FROM digits a CROSS JOIN digits b CROSS JOIN digits c CROSS JOIN digits d
+    LIMIT 10000
+)
+SELECT n,
+       CONCAT('AC', LPAD((n MOD 1000)+1,10,'0')),
+       DATE_ADD('2026-01-01 00:00:00', INTERVAL (n MOD 86400) SECOND),
+       IF(n MOD 2=0,'C','D'),
+       (n MOD 50000)/100,
+       CONCAT('BR',LPAD(n MOD 50,3,'0')),
+       IF(n MOD 3=0,'UPI',IF(n MOD 3=1,'ATM','WEB')),
+       CONCAT('Sample transaction ',n),
+       10000+(n MOD 100000)/100,
+       'Sample'
+FROM nums;
+
+-- Basic record count and approximate data size metrics
+SELECT COUNT(*) AS record_count FROM TXN;
+SELECT COUNT(DISTINCT AccountNo) AS accounts,
+       COUNT(DISTINCT Branch) AS branches FROM TXN;
+
+-- Index design: secondary non-unique indexes for statement and audit queries
+CREATE INDEX idx_txn_account ON TXN(AccountNo);
+CREATE INDEX idx_txn_branch ON TXN(Branch);
+CREATE INDEX idx_txn_time ON TXN(TxnTime);
+
+-- Equality lookups
+SELECT * FROM TXN WHERE TxnID = 5000;
+SELECT * FROM TXN WHERE AccountNo = 'AC0000000001' ORDER BY TxnTime;
+SELECT * FROM TXN WHERE Branch = 'BR001' ORDER BY TxnTime;
+
+-- Range reconciliation: example of 2,000 TxnIDs (adjust bounds)
+SELECT * FROM TXN WHERE TxnID BETWEEN 4001 AND 6000 ORDER BY TxnID;
+
+-- Time-based/hourly reconciliation alternative
+SELECT * FROM TXN
+WHERE TxnTime >= '2026-01-01 01:00:00'
+  AND TxnTime <  '2026-01-01 02:00:00'
+ORDER BY TxnTime;
+
+-- Query plans; compare before/after index creation
+EXPLAIN SELECT * FROM TXN WHERE TxnID=5000;
+EXPLAIN SELECT * FROM TXN WHERE AccountNo='AC0000000001';
+EXPLAIN SELECT * FROM TXN WHERE Branch='BR001';
+EXPLAIN SELECT * FROM TXN WHERE TxnID BETWEEN 4001 AND 6000;
+EXPLAIN ANALYZE SELECT * FROM TXN WHERE AccountNo='AC0000000001';
+
+-- Index and table sizes (approximate server metadata)
+SELECT table_name, index_name, stat_value AS pages
+FROM mysql.innodb_index_stats
+WHERE database_name=DATABASE() AND table_name='TXN'
+  AND stat_name='size';
+
+-- Insert test
+INSERT INTO TXN VALUES
+(10000001,'AC0000000001','2026-01-02 10:00:00','D',125.00,'BR001','UPI',
+ 'Test insertion',5000.00,'Test');
+-- Remove test row
+DELETE FROM TXN WHERE TxnID=10000001;
+
+-- Delete/update boundary tests
+DELETE FROM TXN WHERE TxnID=9999;
+UPDATE TXN SET Amount=Amount+1 WHERE TxnID=5000;
+
+-- Duplicate tests: TxnID duplicate should fail (primary key); AccountNo and Branch duplicates allowed
+-- INSERT INTO TXN VALUES (5000,...); -- expected primary-key error
+
+-- Gateway design: random gateway IDs with time-oriented storage
+-- Demonstration table stores arrival/hour separately from random GatewayTxnID.
+DROP TABLE IF EXISTS GatewayTxn;
+CREATE TABLE GatewayTxn (
+    IngestTime DATETIME NOT NULL,
+    GatewayTxnID BIGINT UNSIGNED NOT NULL,
+    AccountNo VARCHAR(12) NOT NULL,
+    TxnTime DATETIME NOT NULL,
+    Type CHAR(1) NOT NULL,
+    Amount DECIMAL(12,2) NOT NULL,
+    Branch VARCHAR(20) NOT NULL,
+    Channel VARCHAR(10) NOT NULL,
+    Narration VARCHAR(80),
+    Balance DECIMAL(12,2) NOT NULL,
+    OtherData VARCHAR(45),
+    PRIMARY KEY (IngestTime, GatewayTxnID)
+) ENGINE=InnoDB;
+
+CREATE INDEX idx_gateway_id ON GatewayTxn(GatewayTxnID);
+CREATE INDEX idx_gateway_hour ON GatewayTxn(IngestTime);
+
+-- Gateway equality lookup by random 64-bit ID
+SELECT * FROM GatewayTxn WHERE GatewayTxnID=987654321012345678;
+
+-- Reconciliation for an ingestion-hour window
+SELECT * FROM GatewayTxn
+WHERE IngestTime >= '2026-11-20 14:00:00'
+  AND IngestTime <  '2026-11-20 15:00:00'
+ORDER BY IngestTime, GatewayTxnID;
+
+-- Use this statement to collect an execution plan for the gateway reconciliation
+EXPLAIN ANALYZE SELECT * FROM GatewayTxn
+WHERE IngestTime >= '2026-11-20 14:00:00'
+  AND IngestTime <  '2026-11-20 15:00:00'
+ORDER BY IngestTime, GatewayTxnID;
+
+-- Benchmark protocol:
+-- 1. Run each query 5 times; report median duration.
+-- 2. Compare the same dataset/query mix at 1k, 10k, 100k, and 1m rows.
+-- 3. Record EXPLAIN ANALYZE output, elapsed time, and table/index sizes.
+-- 4. Avoid claiming EXPLAIN row estimates as actual disk block counts.
